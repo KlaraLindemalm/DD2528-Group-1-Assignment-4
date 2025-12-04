@@ -14,8 +14,8 @@ TODOs:
     [X] Decrease battery on move
     [X] Recharge method
     [] Notify low battery
-[] Fetch method
-[] Put method
+[X] Fetch method
+[X] Put method
 [] Message receiving
 """
 
@@ -34,6 +34,7 @@ class Robot:
         self.grid = grid
         self.position = start_position
         self.battery_level = 100
+        self.rfid_held = None
         logger.info(f"Initialized at position {start_position}")
 
     def move_to(self, new_position: int) -> bool:
@@ -75,11 +76,41 @@ class Robot:
         """Get the current position of the robot"""
         return self.position
 
+    def recharge_battery(self):
+        """Recharge the robot's battery to full"""
+        self.battery_level = 100
+        logger.info("🔋 Battery recharged to 100%")
+
     def get_battery_level(self) -> int:
         """Get the current battery level of the robot"""
         return self.battery_level
 
-    def recharge_battery(self):
-        """Recharge the robot's battery to full"""
-        self.battery_level = 100
-        logger.info("Battery recharged to 100% 🔋")
+    def fetch_item(self, cb_pos: int, rfid: int) -> bool:
+        """Fetch an item with the given RFID"""
+        if (dist := self.grid.manhattan_distance(cb_pos, self.position)) != 1:
+            logger.warning(
+                f"Cannot put item, robot at {self.position}, not adjacent to CB at {cb_pos} (distance {dist})"
+            )
+        self.rfid_held = rfid
+        logger.info(f"📦 Fetched item with RFID {rfid}")
+        return True
+
+    def put_item(self, shelf_pos: int, rfid: int) -> bool:
+        """Put an item with the given RFID at the current position"""
+        if (dist := self.grid.manhattan_distance(shelf_pos, self.position)) != 1:
+            logger.warning(
+                f"Cannot put item, robot at {self.position}, not adjacent to shelf at {shelf_pos} (distance {dist})"
+            )
+            return False
+        if self.rfid_held != rfid:
+            logger.warning(f"Cannot put item with RFID {rfid}: not held by robot")
+            return False
+
+        logger.info(f"📦 Put item with RFID {rfid} at position {self.position}")
+        self.rfid_held = None
+        return True
+
+    def get_holding_item(self) -> bool:
+        """Check if the robot is currently holding an item"""
+        # Placeholder implementation
+        return self.rfid_held is not None

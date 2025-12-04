@@ -28,6 +28,7 @@ class Grid:
         self.width = width
         self.total_cells = height * width
         self.shelves: Set[int] = set()
+        self.cbs: Set[int] = set()
         logger.info(
             f"Created grid with height={height}, width={width}, total cells={self.total_cells}"
         )
@@ -48,13 +49,33 @@ class Grid:
         """Check if a position contains a shelf"""
         return position in self.shelves
 
+    def add_cb(self, position: int) -> None:
+        """Add CB (obstacle) at given position"""
+        assert self.is_valid_position(position), f"Position {position} is out of bounds"
+        self.cbs.add(position)
+        logger.info(f"Added CB at position {position}")
+
+    def remove_cb(self, position: int) -> None:
+        """Remove CB  at given position"""
+        if position in self.cbs:
+            self.cbs.remove(position)
+            logger.info(f"Removed CB at position {position}")
+
+    def is_cb(self, position: int) -> bool:
+        """Check if position contains a CB"""
+        return position in self.cbs
+
     def is_valid_position(self, position: int) -> bool:
         """Check if a position is valid (within grid bounds)"""
         return 1 <= position <= self.total_cells
 
     def is_walkable(self, position: int) -> bool:
         """Check if a position is walkable (valid and no shelf)"""
-        return self.is_valid_position(position) and not self.is_shelf(position)
+        return (
+            self.is_valid_position(position)
+            and not self.is_shelf(position)
+            and not self.is_cb(position)
+        )
 
     def position_to_coords(self, position: int) -> Tuple[int, int]:
         """
@@ -128,9 +149,11 @@ class Grid:
                 pos = self.coords_to_position(row, col)
 
                 if pos == robot_pos:
-                    row_str.append(" R ")
+                    row_str.append("🤖")
                 elif self.is_shelf(pos):
-                    row_str.append(" X ")
+                    row_str.append(" ⎶ ")
+                elif self.is_cb(pos):
+                    row_str.append(" ⑄ ")
                 elif pos in path_set:
                     row_str.append(" * ")
                 else:

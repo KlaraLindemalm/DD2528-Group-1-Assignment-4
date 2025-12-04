@@ -119,6 +119,53 @@ def demonstrate_bug2_blocked(grid: Grid, start: int, goal: int):
     logger.info("As expected, Bug2 navigation failed due to blocked path.")
 
 
+def demonstrate_fetch_box(grid: Grid, start: int, shelf_goal: int):
+    """Demonstrate fetching a box from a shelf"""
+    logger.info("=" * 60)
+    logger.info("DEMONSTRATING BUG2 - BLOCKED PATH")
+    logger.info("=" * 60)
+
+    robot = Robot(grid, start)
+
+    logger.info("Initial grid:")
+    print(grid.visualize(robot_pos=robot.position))
+
+    # Get nearest adjacent position to shelf
+    all_dijkstras = dijkstra.find_path(robot, goal=None)
+    if not all_dijkstras or not isinstance(all_dijkstras, dict):
+        logger.error("No path found to shelf!")
+        return
+    shelf_neighbors = grid.get_neighbors(shelf_goal)
+    nearest_pos = min(
+        shelf_neighbors,
+        key=lambda pos: (
+            len(all_dijkstras.get(pos, [])) if pos in all_dijkstras else float("inf")
+        ),
+    )
+    if nearest_pos is float("inf"):
+        logger.error("No reachable adjacent position to shelf!")
+        return
+
+    # Move robot to nearest position
+    logger.info(f"Moving robot to position adjacent to shelf at {shelf_goal}")
+    bug2.bug2_navigate(robot, nearest_pos)
+
+    assert robot.get_position() == nearest_pos, "Robot did not reach adjacent position"
+    assert robot.position in grid.get_neighbors(
+        shelf_goal
+    ), "Robot not adjacent to shelf"
+
+    # Fetch item from shelf
+    rfid = 12345
+    success = robot.fetch_item(shelf_goal, rfid)
+    if success:
+        logger.info(
+            f"Successfully fetched item with RFID {rfid} from shelf at {shelf_goal}"
+        )
+    else:
+        logger.error("Failed to fetch item from shelf!")
+
+
 def main():
     """Main function demonstrating all functionality"""
 
@@ -130,6 +177,8 @@ def main():
     grid.add_shelf(9)
     grid.add_shelf(29)
     grid.add_shelf(35)
+    grid.add_cb(3)
+    grid.add_cb(4)
 
     logger.info("Initial Grid Configuration:")
     print(grid.visualize())
@@ -153,18 +202,15 @@ def main():
             distance == expected
         ), f"Distance mismatch: got {distance}, expected {expected}"
 
-    # Demonstration 1: Dijkstra's algorithm
-    demonstrate_dijkstra(grid, start=1, goal=42)
+    # demonstrate_dijkstra(grid, start=1, goal=42)
 
-    # Demonstration 2: Dijkstra's algorithm - all reachable positions
-    demonstrate_dijkstra_all(grid, start=1)
+    # demonstrate_dijkstra_all(grid, start=1)
 
-    # Demonstration 3: Bug2 successful circumnavigation
-    # Path from 1 to 12, with dynamic obstacle at position 6
-    demonstrate_bug2_success(grid, start=1, goal=12, obstacle_pos=6)
+    # demonstrate_bug2_success(grid, start=1, goal=12, obstacle_pos=6)
 
-    # Demonstration 4: Bug2 with blocked path
-    demonstrate_bug2_blocked(grid, start=1, goal=42)
+    # demonstrate_bug2_blocked(grid, start=1, goal=42)
+
+    demonstrate_fetch_box(grid, 1, 29)
 
     logger.info("=" * 60)
     logger.info("ALL DEMONSTRATIONS COMPLETED")
