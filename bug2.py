@@ -55,7 +55,7 @@ def bug2_navigate(
     def is_blocked(pos: int) -> bool:
         return (
             not robot.grid.is_valid_position(pos)
-            or robot.grid.is_shelf(pos)
+            or not robot.grid.is_walkable(pos)
             or pos in dynamic_obstacles
         )
 

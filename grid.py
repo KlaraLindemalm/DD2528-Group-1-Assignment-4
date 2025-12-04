@@ -149,11 +149,11 @@ class Grid:
                 pos = self.coords_to_position(row, col)
 
                 if pos == robot_pos:
-                    row_str.append("🤖")
+                    row_str.append(" R ")
                 elif self.is_shelf(pos):
-                    row_str.append(" ⎶ ")
+                    row_str.append(" S ")
                 elif self.is_cb(pos):
-                    row_str.append(" ⑄ ")
+                    row_str.append(" C ")
                 elif pos in path_set:
                     row_str.append(" * ")
                 else:
@@ -162,3 +162,21 @@ class Grid:
             result.append("".join(row_str))
 
         return "\n".join(result)
+
+    def get_nearest_adjacent_walkable(
+        self, origin_pos: int, target_pos: int
+    ) -> Optional[int]:
+        """Get the nearest walkable position adjacent to the target position"""
+        neighbors = self.get_neighbors(target_pos)
+        walkable_neighbors = [pos for pos in neighbors if self.is_walkable(pos)]
+        logger.info(
+            f"Walkable neighbors of {target_pos}: {walkable_neighbors}"
+        )
+
+        if not walkable_neighbors:
+            return None
+
+        return min(
+            walkable_neighbors,
+            key=lambda pos: self.manhattan_distance(origin_pos, pos),
+        )

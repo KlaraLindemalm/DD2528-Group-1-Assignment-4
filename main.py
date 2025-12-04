@@ -131,18 +131,8 @@ def demonstrate_fetch_box(grid: Grid, start: int, shelf_goal: int):
     print(grid.visualize(robot_pos=robot.position))
 
     # Get nearest adjacent position to shelf
-    all_dijkstras = dijkstra.find_path(robot, goal=None)
-    if not all_dijkstras or not isinstance(all_dijkstras, dict):
-        logger.error("No path found to shelf!")
-        return
-    shelf_neighbors = grid.get_neighbors(shelf_goal)
-    nearest_pos = min(
-        shelf_neighbors,
-        key=lambda pos: (
-            len(all_dijkstras.get(pos, [])) if pos in all_dijkstras else float("inf")
-        ),
-    )
-    if nearest_pos is float("inf"):
+    nearest_pos = grid.get_nearest_adjacent_walkable(robot.position, shelf_goal)
+    if nearest_pos is None:
         logger.error("No reachable adjacent position to shelf!")
         return
 
@@ -166,6 +156,64 @@ def demonstrate_fetch_box(grid: Grid, start: int, shelf_goal: int):
         logger.error("Failed to fetch item from shelf!")
 
 
+def demonstrate_put_box(grid: Grid, start: int, cb_pos: int, shelf_goal: int):
+    """Demonstrate putting a box on a shelf, taken from the CB"""
+    logger.info("=" * 60)
+    logger.info("DEMONSTRATING PUTTING BOX ON SHELF")
+    logger.info("=" * 60)
+
+    robot = Robot(grid, start)
+
+    logger.info("Initial grid:")
+    print(grid.visualize(robot_pos=robot.position))
+
+    # Get nearest adjacent position to CB
+    nearest_cb_pos = grid.get_nearest_adjacent_walkable(robot.position, cb_pos)
+    if nearest_cb_pos is None:
+        logger.error("No reachable adjacent position to CB!")
+        return
+
+    # Move robot to nearest position
+    logger.info(f"Moving robot to position adjacent to CB at {cb_pos}")
+    bug2.bug2_navigate(robot, nearest_cb_pos)
+
+    assert (
+        robot.get_position() == nearest_cb_pos
+    ), "Robot did not reach adjacent position"
+    assert robot.position in grid.get_neighbors(cb_pos), "Robot not adjacent to CB"
+
+    # Fetch item from CB
+    rfid = 67890
+    success = robot.fetch_item(cb_pos, rfid)
+    if success:
+        logger.info(f"Successfully fetched item with RFID {rfid} from CB at {cb_pos}")
+    else:
+        logger.error("Failed to fetch item from CB!")
+        return
+
+    # Now move to shelf
+    nearest_shelf_pos = grid.get_nearest_adjacent_walkable(robot.position, shelf_goal)
+    if nearest_shelf_pos is None:
+        logger.error("No reachable adjacent position to shelf!")
+        return
+
+    logger.info(f"Moving robot to position adjacent to shelf at {shelf_goal}")
+    bug2.bug2_navigate(robot, nearest_shelf_pos)
+    assert (
+        robot.get_position() == nearest_shelf_pos
+    ), f"Robot did not reach adjacent position, expected {nearest_shelf_pos}, got {robot.get_position()}"
+    assert robot.position in grid.get_neighbors(
+        shelf_goal
+    ), "Robot not adjacent to shelf"
+
+    # Put item on shelf
+    success = robot.put_item(shelf_goal, rfid)
+    if success:
+        logger.info(f"Successfully put item with RFID {rfid} on shelf at {shelf_goal}")
+    else:
+        logger.error("Failed to put item on shelf!")
+
+
 def main():
     """Main function demonstrating all functionality"""
 
@@ -180,27 +228,14 @@ def main():
     grid.add_cb(3)
     grid.add_cb(4)
 
+    assert grid.is_walkable(1), "Position 1 should be walkable"
+    assert not grid.is_walkable(8), "Position 8 should not be walkable"
+    assert not grid.is_walkable(3), "Position 3 should not be walkable"
+    assert grid.is_walkable(10), "Position 10 should be walkable"
+
     logger.info("Initial Grid Configuration:")
     print(grid.visualize())
-    print("\nLegend: X = Shelf, R = Robot, * = Path\n")
-
-    # Test Manhattan distance
-    logger.info("Testing Manhattan Distance:")
-    test_distances = [
-        (1, 7, 1),
-        (1, 2, 1),
-        (1, 8, 2),
-        (1, 42, 11),  # Position 1 at (0,0), position 42 at (6,5): |0-6| + |0-5| = 11
-    ]
-
-    for pos1, pos2, expected in test_distances:
-        distance = grid.manhattan_distance(pos1, pos2)
-        logger.info(
-            f"Distance from {pos1} to {pos2}: {distance} (expected: {expected})"
-        )
-        assert (
-            distance == expected
-        ), f"Distance mismatch: got {distance}, expected {expected}"
+    print("\nLegend: S = Shelf, C = CB, R = Robot, * = Path\n")
 
     # demonstrate_dijkstra(grid, start=1, goal=42)
 
@@ -210,7 +245,9 @@ def main():
 
     # demonstrate_bug2_blocked(grid, start=1, goal=42)
 
-    demonstrate_fetch_box(grid, 1, 29)
+    # demonstrate_fetch_box(grid, 1, 29)
+
+    demonstrate_put_box(grid, 1, 4, 8)
 
     logger.info("=" * 60)
     logger.info("ALL DEMONSTRATIONS COMPLETED")
