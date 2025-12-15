@@ -52,6 +52,8 @@ class Robot:
             robot_id = Robot._next_robot_id
             Robot._next_robot_id += 1
         self.robot_id = robot_id
+        # Create a per-robot logger so messages show which robot emitted them
+        self.logger = logging.getLogger(f"robot {self.robot_id}")
         
         # Initialize private obstacle map (for dynamic obstacles detected at runtime)
         self.private_obstacles: set = set()
@@ -59,8 +61,9 @@ class Robot:
         # Register robot and message queue
         Robot._registry[self.robot_id] = self
         Robot._message_queue[self.robot_id] = []
-        
-        logger.info(f"Robot {self.robot_id} initialized at position {start_position}")
+
+        # Log via per-robot logger so the logger name column shows the robot id
+        self.logger.info(f"initialized at position {start_position}")
 
     def move_to(self, new_position: int) -> bool:
         """
@@ -79,16 +82,16 @@ class Robot:
 
         # Check for collision
         if self.grid.is_shelf(new_position):
-            logger.warning(f"Robot {self.robot_id}: Cannot move to {new_position}: shelf detected")
+            self.logger.warning(f"Cannot move to {new_position}: shelf detected")
             return False
 
         # Check private obstacle map (includes obstacles added by this robot during collision avoidance)
         if new_position in self.private_obstacles:
-            logger.warning(f"Robot {self.robot_id}: Cannot move to {new_position}: in private obstacle map")
+            self.logger.warning(f"Cannot move to {new_position}: in private obstacle map")
             return False
 
         if self.battery_level <= 0:
-            logger.warning("Cannot move: battery depleted")
+            self.logger.warning("Cannot move: battery depleted")
             return False
 
         old_position = self.position
@@ -97,7 +100,7 @@ class Robot:
         distance = self.grid.manhattan_distance(old_position, new_position)
         self.battery_level -= distance
 
-        logger.info(
+        self.logger.info(
             f"Moved {old_position} ➡ {new_position}\t[⚡️{self.battery_level}% left]"
         )
         return True
@@ -109,7 +112,7 @@ class Robot:
     def recharge_battery(self):
         """Recharge the robot's battery to full"""
         self.battery_level = 100
-        logger.info("🔋 Battery recharged to 100%")
+        self.logger.info("🔋 Battery recharged to 100%")
 
     def get_battery_level(self) -> int:
         """Get the current battery level of the robot"""
@@ -118,25 +121,25 @@ class Robot:
     def fetch_item(self, cb_pos: int, rfid: int) -> bool:
         """Fetch an item with the given RFID"""
         if (dist := self.grid.manhattan_distance(cb_pos, self.position)) != 1:
-            logger.warning(
+            self.logger.warning(
                 f"Cannot put item, robot at {self.position}, not adjacent to CB at {cb_pos} (distance {dist})"
             )
         self.rfid_held = rfid
-        logger.info(f"📦 Fetched item with RFID {rfid}")
+        self.logger.info(f"📦 Fetched item with RFID {rfid}")
         return True
 
     def put_item(self, shelf_pos: int, rfid: int) -> bool:
         """Put an item with the given RFID at the current position"""
         if (dist := self.grid.manhattan_distance(shelf_pos, self.position)) != 1:
-            logger.warning(
+            self.logger.warning(
                 f"Cannot put item, robot at {self.position}, not adjacent to shelf at {shelf_pos} (distance {dist})"
             )
             return False
         if self.rfid_held != rfid:
-            logger.warning(f"Cannot put item with RFID {rfid}: not held by robot")
+            self.logger.warning(f"Cannot put item with RFID {rfid}: not held by robot")
             return False
 
-        logger.info(f"📦 Put item with RFID {rfid} at position {self.position}")
+        self.logger.info(f"📦 Put item with RFID {rfid} at position {self.position}")
         self.rfid_held = None
         return True
 
@@ -149,7 +152,7 @@ class Robot:
         """Send a message to another robot."""
         if target_id in Robot._message_queue:
             Robot._message_queue[target_id].append((self.robot_id, msg_type, payload))
-            logger.info(f"Robot {self.robot_id}: sent {msg_type.value} to Robot {target_id}")
+            self.logger.info(f"sent {msg_type.value} to Robot {target_id}")
 
     def receive_message(self, msg_type: Optional[MessageType] = None, timeout: float = 1.0) -> Optional[Tuple[int, MessageType, Any]]:
         """
@@ -162,13 +165,13 @@ class Robot:
             if msg_type is None:
                 if queue:
                     msg = queue.pop(0)
-                    logger.info(f"Robot {self.robot_id}: received {msg[1].value} from Robot {msg[0]}")
+                    self.logger.info(f"received {msg[1].value} from Robot {msg[0]}")
                     return msg
             else:
                 for i, (sender_id, mtype, payload) in enumerate(queue):
                     if mtype == msg_type:
                         queue.pop(i)
-                        logger.info(f"Robot {self.robot_id}: received {msg_type.value} from Robot {sender_id}")
+                        self.logger.info(f"received {msg_type.value} from Robot {sender_id}")
                         return (sender_id, mtype, payload)
             time.sleep(0.01)
         return None
@@ -199,7 +202,7 @@ class Robot:
 
         # Broadcast COLLISION_DETECTED to all others
         for r in others:
-            logger.info(f"Robot {self.robot_id}: sending collision message to Robot {r.robot_id}")
+            self.logger.info(f"sending collision message to Robot {r.robot_id}")
             self.send_message(r.robot_id, MessageType.COLLISION_DETECTED, payload)
 
         # Collect messages from expected participants
@@ -238,8 +241,8 @@ class Robot:
             self.send_message(r.robot_id, MessageType.COLLISION_ACK, None)
 
         if is_leader:
-            logger.info(f"Robot {self.robot_id}: elected leader in collision (payload={payload})")
+            self.logger.info(f"elected leader in collision (payload={payload})")
         else:
-            logger.info(f"Robot {self.robot_id}: elected follower in collision (leader={leader[2]})")
+            self.logger.info(f"elected follower in collision (leader={leader[2]})")
 
         return is_leader

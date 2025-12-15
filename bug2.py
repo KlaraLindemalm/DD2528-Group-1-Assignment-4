@@ -208,45 +208,45 @@ def execute_path(
         # Check if obstacle is a robot
         obstacle_type = get_obstacle_type(robot, next_pos)
         
-        if obstacle_type == 'robot':
+        if obstacle_type == "robot":
             # Robot detected - execute collision protocol
-            logger.warning(f"Robot {robot.robot_id}: Detected other robot at position {next_pos}!")
-            
+            robot.logger.warning(f"Detected other robot at position {next_pos}!")
+
             other_robot = Robot.get_robot_at(next_pos)
             if other_robot is None:
                 continue
-            
+
             # Execute collision protocol to determine order
             am_leader = robot.collision_protocol(other_robot)
-            
+
             if am_leader:
-                logger.info(f"Robot {robot.robot_id}: I am leader, executing Bug2")
+                robot.logger.info("I am leader, executing Bug2")
                 # Add the other robot's position to private obstacle map
                 robot.private_obstacles.add(next_pos)
                 # Run Bug2 to circumnavigate
                 success = bug2_navigate(robot, goal, dynamic_obstacles.union(robot.private_obstacles))
                 # Send finished message with current position
-                logger.info(f"Robot {robot.robot_id}: finished Bug2, notifying other robot at position {robot.position}")
+                robot.logger.info(f"finished Bug2, notifying other robot at position {robot.position}")
                 robot.send_message(other_robot.robot_id, MessageType.FINISHED, robot.position)
                 return success
             else:
-                logger.info(f"Robot {robot.robot_id}: I am follower, waiting for leader to finish")
+                robot.logger.info("I am follower, waiting for leader to finish")
                 # Wait for leader to finish
                 finished_msg = robot.receive_message(MessageType.FINISHED, timeout=10.0)
                 if finished_msg is not None:
                     _, _, leader_final_pos = finished_msg
-                    logger.info(f"Robot {robot.robot_id}: leader finished at position {leader_final_pos}, adding to private obstacles")
+                    robot.logger.info(f"leader finished at position {leader_final_pos}, adding to private obstacles")
                     robot.private_obstacles.add(leader_final_pos)
                     # Continue executing path from current position, avoiding leader's position
                     return execute_path(robot, path[i - 1:], dynamic_obstacles.union(robot.private_obstacles))
                 else:
-                    logger.warning(f"Robot {robot.robot_id}: timeout waiting for leader to finish")
+                    robot.logger.warning("timeout waiting for leader to finish")
                     return False
         
         # Check for static obstacles or dynamic obstacles
         if next_pos in dynamic_obstacles or robot.grid.is_shelf(next_pos):
-            logger.warning(f"Obstacle detected at position {next_pos}!")
-            logger.info("Switching to Bug2 algorithm for obstacle avoidance")
+            robot.logger.warning(f"Obstacle detected at position {next_pos}!")
+            robot.logger.info("Switching to Bug2 algorithm for obstacle avoidance")
 
             # Switch to Bug2 to circumnavigate
             return bug2_navigate(robot, goal, dynamic_obstacles)
@@ -376,36 +376,22 @@ def _step_robot(robot: Robot, path: List[int], idx: int) -> tuple[int, bool]:
         return len(path), False
 
 
-def run_two_robot_paths(
-    robot1: Robot | List[Robot],
-    path1: List[int] | List[List[int]],
-    robot2: Optional[Robot] = None,
-    path2: Optional[List[int]] = None,
+def run_multi_robot_paths(
+    robots: List[Robot],
+    paths: List[List[int]],
     dynamic_obstacles: Optional[Set[int]] = None,
     timeout: float = 10.0,
 ) -> dict:
-    """
-    Run two robots along their precomputed paths concurrently using
-    alternating steps. Pre-checks for collisions are performed before each
-    step; on collision, `handle_pair_collision` is invoked.
+    """Run multiple robots concurrently along precomputed paths.
 
-    Returns a dict with results: {'success1', 'success2', 'final1', 'final2'}
+    robots: list of Robot instances
+    paths: list of corresponding paths (each a list of positions)
     """
     if dynamic_obstacles is None:
         dynamic_obstacles = set()
 
-    # Flexible input: allow either (robot, path, robot2, path2, ...) or
-    # ( [robots], [paths], ... )
-    if isinstance(robot1, list):
-        robots: List[Robot] = robot1
-        paths: List[List[int]] = path1  # type: ignore
-    else:
-        assert robot2 is not None and path2 is not None, "Two-robot mode requires both robots and paths"
-        robots = [robot1, robot2]
-        paths = [path1, path2]  # type: ignore
-
+    assert len(robots) == len(paths), "Robots and paths length mismatch"
     n = len(robots)
-    assert n == len(paths), "Robots and paths length mismatch"
 
     logger.info(f"Running concurrent paths for robots: {[r.robot_id for r in robots]}")
 
@@ -475,7 +461,7 @@ def run_two_robot_paths(
                 leader_goal = paths[leader_idx][-1]
 
                 # Leader navigates around; followers wait
-                logger.info(f"Leader in group {comp} is R{leader.robot_id}")
+                leader.logger.info(f"Leader in group {comp} is R{leader.robot_id}")
                 for i in comp:
                     if i != leader_idx:
                         leader.private_obstacles.add(robots[i].position)
@@ -499,7 +485,7 @@ def run_two_robot_paths(
                         _, _, leader_pos = msg
                         robots[i].private_obstacles.add(leader_pos)
                     else:
-                        logger.warning(f"Robot {robots[i].robot_id}: timeout waiting for group leader FINISHED")
+                        robots[i].logger.warning("timeout waiting for group leader FINISHED")
                         success[i] = False
 
             # After handling groups, continue to next loop iteration
@@ -518,4 +504,15 @@ def run_two_robot_paths(
     for i in range(n):
         results[f"final{i+1}"] = robots[i].position
     return results
+
+
+def run_two_robot_paths(
+    robots: List[Robot],
+    paths: List[List[int]],
+    dynamic_obstacles: Optional[Set[int]] = None,
+    timeout: float = 10.0,
+) -> dict:
+    """Deprecated alias for run_multi_robot_paths."""
+    logger.warning("run_two_robot_paths is deprecated, use run_multi_robot_paths")
+    return run_multi_robot_paths(robots, paths, dynamic_obstacles, timeout)
 

@@ -62,8 +62,12 @@ class ColoredFormatter(logging.Formatter):
 
     def format(self, record: logging.LogRecord) -> str:
         # Get module color
-        module_name = record.name.split('.')[-1]
-        module_color = self.MODULE_COLORS.get(module_name, Colors.INFO)
+        module_name = record.name
+        module_color = Colors.INFO
+        for key, col in self.MODULE_COLORS.items():
+            if module_name == key or module_name.startswith(key + " ") or module_name.startswith(key + ".") or module_name.startswith(key):
+                module_color = col
+                break
 
         # Get level color
         level_color = self.LEVEL_COLORS.get(record.levelname, Colors.INFO)

@@ -255,7 +255,7 @@ def main():
         Robot._next_robot_id = 1
 
         starts = [1, 10, 20, 24, 34]
-        goals = [2, 34, 24, 20, 10]
+        goals = [41, 20, 10, 34, 24]
 
         robots = [Robot(grid, s) for s in starts]
         paths: list[list[int]] = []
@@ -267,7 +267,7 @@ def main():
             paths.append(path)
 
         logger.info("Starting 5-robot scenario")
-        res = bug2.run_two_robot_paths(robots, paths)
+        res = bug2.run_multi_robot_paths(robots, paths)
         logger.info(f"5-robot result: {res}")
         for r in robots:
             logger.info(f"Robot {r.robot_id} final pos: {r.position}")
