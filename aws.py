@@ -14,6 +14,8 @@ class AWS:
         self.jobs: Dict[int, Dict] = {}
         # Maximum number of concurrent assigned/in-progress jobs
         self.max_concurrent_assignments = 5
+        # Queue of robot IDs waiting for charging ports to become available
+        self.robots_waiting_for_charge: List[int] = []
 
         # Register as AWS callback for robot notifications
         Robot.register_aws_callback(self.handle_robot_notification)
@@ -107,7 +109,10 @@ class AWS:
                     if port is not None:
                         self.create_charge_job(r.robot_id, port)
                     else:
-                        logger.warning(f"No free charging ports to instruct R{r.robot_id} to charge")
+                        # Add to waiting queue if not already there
+                        if r.robot_id not in self.robots_waiting_for_charge:
+                            logger.info(f"No free charging ports for R{r.robot_id}; adding to waiting queue")
+                            self.robots_waiting_for_charge.append(r.robot_id)
                 continue
 
             logger.info(f"Attempting to assign job {job_id} to R{r.robot_id}: {csv} (need {required})")
@@ -149,7 +154,10 @@ class AWS:
                 logger.info(f"Telling R{best.robot_id} to charge at CB {port}")
                 self.create_charge_job(best.robot_id, port)
             else:
-                logger.warning("No free charging ports found; job will remain pending")
+                # Add to waiting queue if not already there
+                if best.robot_id not in self.robots_waiting_for_charge:
+                    logger.info(f"No free charging ports for R{best.robot_id}; adding to waiting queue")
+                    self.robots_waiting_for_charge.append(best.robot_id)
 
     def _build_csv_for_store(self, robot: Robot, job: Dict) -> Optional[str]:
         # Compute positions where the robot needs to stand to fetch and put
@@ -252,6 +260,30 @@ class AWS:
                 return cb
         return None
 
+    def _retry_waiting_robots(self) -> None:
+        """Attempt to assign charging jobs to robots waiting for ports."""
+        waiting = self.robots_waiting_for_charge[:]
+        for robot_id in waiting:
+            r = Robot._registry.get(robot_id)
+            if r is None:
+                # Robot no longer exists, remove from queue
+                self.robots_waiting_for_charge.remove(robot_id)
+                continue
+            
+            # Check if this robot already has a charge job
+            if self._robot_has_charge_job(robot_id):
+                self.robots_waiting_for_charge.remove(robot_id)
+                continue
+            
+            # Try to find a free port
+            port = self._find_free_charging_port()
+            if port is not None:
+                logger.info(f"Free charging port available for R{robot_id}; creating charge job at CB {port}")
+                self.create_charge_job(robot_id, port)
+                self.robots_waiting_for_charge.remove(robot_id)
+            else:
+                logger.debug(f"Still no free charging port for R{robot_id}")
+
     def handle_robot_notification(self, robot_id: int, message: str) -> None:
         logger.info(f"AWS received notification from R{robot_id}: {message}")
         # Simple parsers for messages
@@ -274,6 +306,8 @@ class AWS:
                 if job:
                     job["status"] = "complete"
                     logger.info(f"Job {jid} completed by R{robot_id}")
+                    # Job completion might have freed a charging port, try to charge waiting robots
+                    self._retry_waiting_robots()
             else:
                 logger.warning("Malformed COMPLETE message: %s", message)
             return

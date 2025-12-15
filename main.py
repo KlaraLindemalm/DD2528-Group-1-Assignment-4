@@ -423,17 +423,15 @@ def demonstrate_synchronized_aws_execution(grid: Grid):
         Robot(grid, start_position=26),
     ]
     
-    robots[2].battery_level = 15  # Simulate low battery for one robot
-
     logger.info(f"Created 5 robots at positions: {[r.position for r in robots]}")
 
-    # Define job specs (cb_pos, shelf_pos)
+
     job_specs = [
-        (6, 35),
-        (37, 9),
-        (6, 8),
-        (37, 29),
-        (6, 29),
+        (29, 8),   
+        (8, 29),  
+        (37, 22),  
+        (22, 9),    
+        (22, 35),   
     ]
 
     # Use warehouse_interaction_simulator to orchestrate everything
@@ -450,7 +448,7 @@ def main():
     grid.add_shelf(9)
     grid.add_shelf(29)
     grid.add_shelf(35)
-    grid.add_cb(6)
+    grid.add_cb(22)
     grid.add_cb(37)
 
     assert grid.is_walkable(1), "Position 1 should be walkable"
@@ -466,7 +464,7 @@ def main():
 
     # demonstrate_dijkstra_all(grid, start=1)
 
-    # demonstrate_bug2_success(grid, start=1, goal=12, obstacle_pos=6)
+    #demonstrate_bug2_success(grid, start=1, goal=12, obstacle_pos=6)
 
     # demonstrate_bug2_blocked(grid, start=1, goal=42)
 

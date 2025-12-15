@@ -163,11 +163,7 @@ class Robot:
         # If provided with a path (list), execute adjacency steps
         if isinstance(target, list):
             path = list(target)
-            # Ensure path starts at our current position. If AWS sent a path
-            # that starts at our current position, great. If it starts at the
-            # next position, prepend our current position so bug2.execute_path's
-            # contract (path[0] == robot.position) holds. If neither is true,
-            # fall back to computing a path from here to the destination.
+
         elif isinstance(target, int):
             if target == self.position:
                 # Already there
@@ -213,6 +209,7 @@ class Robot:
             self.logger.warning(
                 f"Cannot fetch item, robot at {self.position}, not adjacent to CB at {cb_pos} (distance {dist})"
             )
+            return False
         self.rfid_held = rfid
         self.logger.info(f"📦 Fetched item with RFID {rfid}")
         return True
@@ -229,9 +226,6 @@ class Robot:
                 continue
             cmd = tokens[0].lower()
             if cmd == "move" and len(tokens) >= 2:
-                # If the move instruction already contains a full explicit path
-                # (multiple positions), count those steps directly. Otherwise,
-                # treat the single argument as a target and compute path length.
                 if len(tokens) > 2:
                     required += max(0, len(tokens) - 1)
                 else:
@@ -384,13 +378,7 @@ class Robot:
         """Process a single AWS message consisting of comma-separated instructions.
 
         Expected CSV format (examples):
-          "move 2,fetch 3 111,move 7,put 8 111"
-
-        Supported commands:
-          - move <pos>
-          - charge <pos>
-          - fetch <pos> [rfid]
-          - put <pos> [rfid]
+          "move 1 2 3 4 10 12,fetch 13 111,move 12 11 10 9,put 8 111"
 
         The robot will execute instructions in order
         """
