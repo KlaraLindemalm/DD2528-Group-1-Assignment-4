@@ -223,8 +223,8 @@ def execute_path(
                 robot.logger.info("I am leader, executing Bug2")
                 # Add the other robot's position to private obstacle map
                 robot.private_obstacles.add(next_pos)
-                # Run Bug2 to circumnavigate
-                success = bug2_navigate(robot, goal, dynamic_obstacles.union(robot.private_obstacles))
+                other_positions = {r.position for r in Robot._registry.values() if r.robot_id != robot.robot_id}
+                success = bug2_navigate(robot, goal, dynamic_obstacles.union(robot.private_obstacles).union(other_positions))
                 # Send finished message with current position
                 robot.logger.info(f"finished Bug2, notifying other robot at position {robot.position}")
                 robot.send_message(other_robot.robot_id, MessageType.FINISHED, robot.position)
@@ -237,8 +237,8 @@ def execute_path(
                     _, _, leader_final_pos = finished_msg
                     robot.logger.info(f"leader finished at position {leader_final_pos}, adding to private obstacles")
                     robot.private_obstacles.add(leader_final_pos)
-                    # Continue executing path from current position, avoiding leader's position
-                    return execute_path(robot, path[i - 1:], dynamic_obstacles.union(robot.private_obstacles))
+                    other_positions = {r.position for r in Robot._registry.values() if r.robot_id != robot.robot_id}
+                    return execute_path(robot, path[i - 1:], dynamic_obstacles.union(robot.private_obstacles).union(other_positions))
                 else:
                     robot.logger.warning("timeout waiting for leader to finish")
                     return False
@@ -248,8 +248,8 @@ def execute_path(
             robot.logger.warning(f"Obstacle detected at position {next_pos}!")
             robot.logger.info("Switching to Bug2 algorithm for obstacle avoidance")
 
-            # Switch to Bug2 to circumnavigate
-            return bug2_navigate(robot, goal, dynamic_obstacles)
+            other_positions = {r.position for r in Robot._registry.values() if r.robot_id != robot.robot_id}
+            return bug2_navigate(robot, goal, dynamic_obstacles.union(other_positions))
 
         # Move to next position
         success = robot.move_to(next_pos)
@@ -378,7 +378,9 @@ def run_multi_robot_paths(
                     if i != leader_idx:
                         leader.private_obstacles.add(robots[i].position)
 
-                leader_success = bug2_navigate(leader, leader_goal, dynamic_obstacles.union(leader.private_obstacles) if dynamic_obstacles else leader.private_obstacles)
+                other_positions = {r.position for r in Robot._registry.values() if r.robot_id != leader.robot_id}
+                leader_dynamic = dynamic_obstacles.union(leader.private_obstacles).union(other_positions) if dynamic_obstacles else leader.private_obstacles.union(other_positions)
+                leader_success = bug2_navigate(leader, leader_goal, leader_dynamic)
 
                 # Notify followers
                 for i in comp:
@@ -416,15 +418,4 @@ def run_multi_robot_paths(
     for i in range(n):
         results[f"final{i+1}"] = robots[i].position
     return results
-
-
-def run_two_robot_paths(
-    robots: List[Robot],
-    paths: List[List[int]],
-    dynamic_obstacles: Optional[Set[int]] = None,
-    timeout: float = 10.0,
-) -> dict:
-    """Deprecated alias for run_multi_robot_paths."""
-    logger.warning("run_two_robot_paths is deprecated, use run_multi_robot_paths")
-    return run_multi_robot_paths(robots, paths, dynamic_obstacles, timeout)
 
