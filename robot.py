@@ -5,7 +5,7 @@ Provides movement capabilities with safety checks.
 
 from grid import Grid
 import time
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple, Union
 import logging
 from enum import Enum   
 
@@ -62,6 +62,9 @@ class Robot:
         Robot._registry[self.robot_id] = self
         Robot._message_queue[self.robot_id] = []
         self.active = True
+        # Job state
+        self.current_job_id: Optional[int] = None
+        self.busy: bool = False
 
         # Log via per-robot logger so the logger name column shows the robot id
         self.logger.info(f"initialized at position {start_position}")
@@ -99,7 +102,7 @@ class Robot:
 
         if self.battery_level - 1 <= 0:
             self.logger.warning(
-                f"Insufficient battery to step to {new_position} (need {required}, have {self.battery_level})"
+                f"Insufficient battery to step to {new_position} (need 1, have {self.battery_level})"
             )
             self.notify_aws("Battery depleted during step")
             self.active = False
@@ -124,37 +127,68 @@ class Robot:
     def notify_aws(self, message: str) -> None:
         """Notify AWS about an important event."""
         # Log as an error-level message and invoke callback if present
-        self.logger.error(f"NOTIFY_AWS: {message}")
+        # Append job context if available
+        if self.current_job_id is not None:
+            full_msg = f"{message} (job {self.current_job_id})"
+        else:
+            full_msg = message
+
+        self.logger.error(f"NOTIFY_AWS: {full_msg}")
         if Robot._aws_callback is not None:
             try:
-                Robot._aws_callback(self.robot_id, message)
+                Robot._aws_callback(self.robot_id, full_msg)
             except Exception as e:
                 self.logger.exception("AWS callback failed: %s", e)
 
-    def move_to(self, target: int) -> bool:
+    # (Combined move_to implementation is below)
+
+    def move_to(self, target: Union[int, List[int]]) -> bool:
+        """Move the robot to a target position or along an explicit path.
+
+        Accepts either:
+          - an integer target position: performs planner-backed movement using
+            Dijkstra + `bug2.execute_path`,
+          - a list of positions representing an explicit adjacency path where
+            each entry is the next position to step into. In this case the
+            robot executes adjacency `step()` calls for each position in order.
+
+        Returns True if the movement completed successfully, False otherwise.
+        """
+        path = []
+        destination = int
         if not self.active:
             self.logger.warning("Cannot execute move: robot inactive due to prior error or depleted battery")
             return False
 
-        import dijkstra
+        # If provided with a path (list), execute adjacency steps
+        if isinstance(target, list):
+            path = list(target)
+            # Ensure path starts at our current position. If AWS sent a path
+            # that starts at our current position, great. If it starts at the
+            # next position, prepend our current position so bug2.execute_path's
+            # contract (path[0] == robot.position) holds. If neither is true,
+            # fall back to computing a path from here to the destination.
+        elif isinstance(target, int):
+            if target == self.position:
+                # Already there
+                return True
+
+            import dijkstra
+
+            path = dijkstra.find_path(self, target)
+            if not path:
+                self.logger.warning(f"No path found to target {target}")
+                return False
+        destination = path[-1]
         import bug2
-
-        if target == self.position:
-            # Already there
-            return True
-
-        path = dijkstra.find_path(self, target)
-        if not path:
-            self.logger.warning(f"No path found to target {target}")
-            return False
 
         required = max(0, len(path) - 1)
 
         if self.battery_level - required <= 0:
             self.logger.warning(
-                f"Insufficient battery to move to {target} (need {required}, have {self.battery_level})"
+                f"Insufficient battery to move to {destination} (need {required}, have {self.battery_level})"
             )
-            self.notify_aws(f"Insufficient battery to move to {target} (need {required}, have {self.battery_level})")
+            self.notify_aws(f"Insufficient battery to move to {destination} (need {required}, have {self.battery_level})")
             self.active = False
             return False
 
@@ -181,6 +215,51 @@ class Robot:
             )
         self.rfid_held = rfid
         self.logger.info(f"📦 Fetched item with RFID {rfid}")
+        return True
+
+    def compute_required_battery_for_csv(self, csv_msg: str) -> int:
+        """Estimate battery required to execute CSV instructions (only counts move steps)."""
+        import dijkstra
+
+        required = 0
+        parts = [p.strip() for p in csv_msg.split(",") if p.strip()]
+        for inst in parts:
+            tokens = inst.split()
+            if not tokens:
+                continue
+            cmd = tokens[0].lower()
+            if cmd == "move" and len(tokens) >= 2:
+                # If the move instruction already contains a full explicit path
+                # (multiple positions), count those steps directly. Otherwise,
+                # treat the single argument as a target and compute path length.
+                if len(tokens) > 2:
+                    required += max(0, len(tokens) - 1)
+                else:
+                    try:
+                        target = int(tokens[1])
+                    except ValueError:
+                        continue
+                    path = dijkstra.find_path(self, target)
+                    if path and isinstance(path, list):
+                        required += max(0, len(path) - 1)
+        return required
+
+    def charge_at(self, cb_pos: int) -> bool:
+        """Move to a position adjacent to `cb_pos` and recharge battery."""
+        nearest = self.grid.get_nearest_adjacent_walkable(self.position, cb_pos)
+        if nearest is None:
+            self.logger.warning(f"No adjacent walkable position to charge at {cb_pos}")
+            return False
+
+        self.logger.info(f"Moving to charge at adjacent position {nearest}")
+        ok = self.move_to(nearest)
+        if not ok:
+            self.logger.warning("Failed to reach charging position")
+            return False
+
+        self.recharge_battery()
+        # Notify AWS that charging completed (job context preserved if set)
+        self.notify_aws("CHARGED")
         return True
 
     def put_item(self, shelf_pos: int, rfid: int) -> bool:
@@ -323,8 +402,37 @@ class Robot:
             self.logger.warning("Cannot process AWS message: robot inactive due to battery or prior error")
             return False
 
-        overall_ok = True
-        parts = [p.strip() for p in msg.split(",") if p.strip()]
+        # Only accept assignment messages coming from AWS.
+        # Assignment format: 'assign:<job_id>:<csv_instructions>'
+        if not (isinstance(msg, str) and msg.startswith("assign:")):
+            self.logger.warning("AWS messages must be assignment formatted: 'assign:<job_id>:<csv>'")
+            return False
+
+        try:
+            _, job_id_str, csv_body = msg.split(":", 2)
+            job_id = int(job_id_str)
+        except Exception as e:
+            self.logger.warning("Invalid assign message format: %s (%s)", msg, e)
+            return False
+
+        return self._handle_assignment(job_id, csv_body)
+
+    def _handle_assignment(self, job_id: int, csv_body: str) -> bool:
+        """Handle an assignment message: ACK, execute step-based CSV, and report completion.
+
+        Note: AWS is responsible for computing paths and checking battery sufficiency.
+        The CSV is expected to contain explicit 'move <p1> <p2> ...' and other
+        high-level instructions like 'fetch', 'put', or 'charge'.
+        """
+
+        # Accept assignment
+        self.current_job_id = job_id
+        self.busy = True
+        self.notify_aws(f"ACK job {job_id}")
+
+        # Execute the CSV body using match/case for instruction handling
+        ok = True
+        parts = [p.strip() for p in csv_body.split(",") if p.strip()]
         for inst in parts:
             tokens = inst.split()
             if not tokens:
@@ -333,54 +441,69 @@ class Robot:
             try:
                 match cmd:
                     case "move":
+                        # move <p1> <p2> ... : explicit path positions to traverse (each is adjacent)
                         if len(tokens) < 2:
-                            self.logger.warning("Invalid move instruction (missing target): %s", inst)
-                            overall_ok = False
+                            self.logger.warning("Invalid move instruction (missing path): %s", inst)
+                            ok = False
                             break
-                        target = int(tokens[1])
-                        ok = self.move_to(target)
-                        if ok:
-                            self.logger.info(f"AWS executed move to {target}")
-                        else:
-                            self.logger.warning(f"AWS move to {target} failed")
-                            overall_ok = False
+                        try:
+                            path = [int(t) for t in tokens[1:]]
+                        except Exception:
+                            self.logger.warning("Invalid move path in instruction: %s", inst)
+                            ok = False
+                            break
+                        if not self.move_to(path):
+                            ok = False
+                            break
 
                     case "fetch":
                         if len(tokens) < 2:
                             self.logger.warning("Invalid fetch instruction (missing target): %s", inst)
-                            overall_ok = False
+                            ok = False
                             break
                         target = int(tokens[1])
                         rfid = int(tokens[2]) if len(tokens) > 2 else -1
-                        ok = self.fetch_item(target, rfid)
-                        if not ok:
-                            overall_ok = False
+                        if not self.fetch_item(target, rfid):
+                            ok = False
+                            break
 
                     case "put":
                         if len(tokens) < 3:
                             self.logger.warning("Invalid put instruction (need target and rfid): %s", inst)
-                            overall_ok = False
+                            ok = False
                             break
                         target = int(tokens[1])
                         rfid = int(tokens[2])
-                        ok = self.put_item(target, rfid)
-                        if not ok:
-                            overall_ok = False
+                        if not self.put_item(target, rfid):
+                            ok = False
+                            break
+
                     case "charge":
                         if len(tokens) < 2:
                             self.logger.warning("Invalid charge instruction (missing target): %s", inst)
-                            overall_ok = False
+                            ok = False
                             break
+                        # 'charge <cb_pos>' should be handled by moving to adjacent spot and recharging
                         target = int(tokens[1])
-                        ok = self.charge_at(target)
-                        if not ok:
-                            overall_ok = False
+                        if not self.charge_at(target):
+                            ok = False
+                            break
 
                     case _:
-                        self.logger.warning("Unknown AWS instruction: %s", inst)
-                        overall_ok = False
+                        self.logger.warning("Unknown assignment instruction: %s", inst)
+                        ok = False
+                        break
             except Exception as e:
-                self.logger.warning("Error executing AWS instruction '%s': %s", inst, e)
-                overall_ok = False
+                self.logger.exception("Error during assignment execution: %s", e)
+                ok = False
+                break
 
-        return overall_ok
+        if ok:
+            self.notify_aws(f"COMPLETE job {job_id}")
+        else:
+            self.notify_aws(f"FAILED job {job_id}")
+
+        # Clear job state
+        self.current_job_id = None
+        self.busy = False
+        return ok

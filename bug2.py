@@ -18,7 +18,7 @@ class State(Enum):
 
 def bug2_navigate(
     robot: Robot, goal: int, dynamic_obstacles: Optional[Set[int]] = None
-) -> bool:
+) -> Tuple[bool, bool]:
     """
     Navigate to goal using Bug2 algorithm with dynamic obstacle detection.
 
@@ -34,7 +34,7 @@ def bug2_navigate(
         dynamic_obstacles: Set of positions with dynamic obstacles
 
     Returns:
-        True if goal reached, False if path blocked
+        Tuple of (success: bool, entered_boundary_mode: bool)
     """
     assert robot.grid.is_valid_position(goal), f"Goal {goal} is out of bounds"
 
@@ -63,6 +63,7 @@ def bug2_navigate(
     state = State.DIRECT
     hit_point_distance = 1_000_000  # Large initial value
     visited_in_boundary = set()
+    entered_boundary_mode = False
 
     while robot.position != goal and iteration < max_iterations:
         iteration += 1
@@ -85,7 +86,7 @@ def bug2_navigate(
 
             if not neighbors_by_distance:
                 logger.error("No valid neighbors in direct mode, path blocked")
-                return False
+                return (False, entered_boundary_mode)
 
             best_neighbor, best_distance = neighbors_by_distance[0]
 
@@ -107,6 +108,7 @@ def bug2_navigate(
                 )
 
                 state = State.BOUNDARY
+                entered_boundary_mode = True
                 hit_point_distance = current_m_distance
                 visited_in_boundary = {robot.position}
 
@@ -115,7 +117,7 @@ def bug2_navigate(
                 valid_neighbors = [n for n in neighbors if not is_blocked(n)]
                 if not valid_neighbors:
                     logger.error("No valid neighbors when entering boundary mode")
-                    return False
+                    return (False, entered_boundary_mode)
 
                 success = robot.step(valid_neighbors[0])
                 if not success:
@@ -136,6 +138,8 @@ def bug2_navigate(
                     f"Leave point found! m-distance {current_m_distance} < {hit_point_distance}"
                 )
                 logger.info("Returning to direct mode")
+                # Notify AWS that robot had to enter boundary mode and ask for re-evaluation
+                robot.notify_aws(f"Bug2 boundary mode detected at position {robot.position}. Requesting task re-evaluation from current position.")
                 state = State.DIRECT
                 hit_point_distance = 1_000_000  # Reset to large initial value
                 visited_in_boundary = set()
@@ -147,7 +151,7 @@ def bug2_navigate(
 
             if not valid_neighbors:
                 logger.error("No valid neighbors in boundary mode, path blocked")
-                return False
+                return (False, entered_boundary_mode)
 
             # Choose next position for wall-following
             # Prefer positions that haven't been visited recently (avoid loops)
@@ -165,7 +169,7 @@ def bug2_navigate(
                     logger.error(
                         "Stuck in boundary following loop, path may be blocked"
                     )
-                    return False
+                    return (False, entered_boundary_mode)
 
             success = robot.step(next_pos)
             if not success:
@@ -179,10 +183,10 @@ def bug2_navigate(
 
     if robot.position == goal:
         logger.info("Successfully reached goal at position %s", goal)
-        return True
+        return (True, entered_boundary_mode)
     else:
         logger.error(f"Max iterations reached without finding goal")
-        return False
+        return (False, entered_boundary_mode)
     
 def execute_path(
     robot: Robot, path: List[int], dynamic_obstacles: Optional[Set[int]] = None
@@ -233,7 +237,7 @@ def execute_path(
                 # Add the other robot's position to private obstacle map
                 robot.private_obstacles.add(next_pos)
                 other_positions = {r.position for r in Robot._registry.values() if r.robot_id != robot.robot_id}
-                success = bug2_navigate(robot, goal, dynamic_obstacles.union(robot.private_obstacles).union(other_positions))
+                success, _ = bug2_navigate(robot, goal, dynamic_obstacles.union(robot.private_obstacles).union(other_positions))
                 # Send finished message with current position
                 robot.logger.info(f"finished Bug2, notifying other robot at position {robot.position}")
                 robot.send_message(other_robot.robot_id, MessageType.FINISHED, robot.position)
@@ -258,7 +262,8 @@ def execute_path(
             robot.logger.info("Switching to Bug2 algorithm for obstacle avoidance")
 
             other_positions = {r.position for r in Robot._registry.values() if r.robot_id != robot.robot_id}
-            return bug2_navigate(robot, goal, dynamic_obstacles.union(other_positions))
+            success, _ = bug2_navigate(robot, goal, dynamic_obstacles.union(other_positions))
+            return success
 
         # Move to next position
         success = robot.step(next_pos)

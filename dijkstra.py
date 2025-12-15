@@ -11,30 +11,42 @@ import logging
 logger = logging.getLogger(__name__)
 
 
-def find_path(robot: Robot, goal: Optional[int] = None) -> Union[Optional[List[int]], Dict[int, List[int]]]:
+def find_path(start: Union[Robot, int], goal: Optional[int] = None, grid=None) -> Union[Optional[List[int]], Dict[int, List[int]]]:
     """
-    Find shortest path from robot's current position using Dijkstra's algorithm
+    Find shortest path using Dijkstra's algorithm.
 
     Args:
-        robot: Robot instance with current position
+        start: Either a `Robot` instance (uses robot.position and robot.grid) or
+               an integer start position (requires `grid` to be provided).
         goal: Target position to reach. If None, returns paths to all reachable positions.
+        grid: Optional grid instance to use when `start` is an int.
 
     Returns:
         If goal is specified: List of positions from start to goal, or None if no path exists
         If goal is None: Dictionary mapping each reachable position to its path from start
     """
-    if goal is not None:
-        assert robot.grid.is_valid_position(goal), f"Goal {goal} is out of bounds"
+    # Resolve start position and grid
+    if isinstance(start, Robot):
+        start_pos = start.position
+        grid_obj = start.grid
+    else:
+        start_pos = int(start)
+        if grid is None:
+            raise AssertionError("When calling find_path with a start position int, a grid must be provided")
+        grid_obj = grid
 
-        if not robot.grid.is_walkable(goal):
+    if goal is not None:
+        assert grid_obj.is_valid_position(goal), f"Goal {goal} is out of bounds"
+
+        if not grid_obj.is_walkable(goal):
             logger.error(f"Goal position {goal} is blocked by a shelf")
             return None
 
-        logger.info(f"Running Dijkstra from {robot.position} to {goal}")
+        logger.info(f"Running Dijkstra from {start_pos} to {goal}")
     else:
-        logger.info(f"Running Dijkstra from {robot.position} to find all reachable positions")
+        logger.info(f"Running Dijkstra from {start_pos} to find all reachable positions")
 
-    start = robot.position
+    start = start_pos
 
     # Priority queue: (distance, position)
     pq = [(0, start)]
@@ -62,8 +74,8 @@ def find_path(robot: Robot, goal: Optional[int] = None) -> Union[Optional[List[i
             logger.info(f"Dijkstra found path of length {len(path)}: {path}")
             return path
 
-        for neighbor in robot.grid.get_neighbors(current):
-            if neighbor in visited or not robot.grid.is_walkable(neighbor):
+        for neighbor in grid_obj.get_neighbors(current):
+            if neighbor in visited or not grid_obj.is_walkable(neighbor):
                 continue
 
             new_dist = current_dist + 1  # All moves have cost 1
@@ -74,7 +86,7 @@ def find_path(robot: Robot, goal: Optional[int] = None) -> Union[Optional[List[i
                 heapq.heappush(pq, (new_dist, neighbor))
 
     if goal is not None:
-        logger.warning(f"No path found from {robot.position} to {goal}")
+        logger.warning(f"No path found from {start_pos} to {goal}")
         return None
     else:
         # Reconstruct paths to all reachable positions
@@ -115,7 +127,7 @@ def navigate(robot: Robot, goal: int) -> bool:
     # Execute the path
     for i in range(1, len(path)):
         next_pos = path[i]
-        success = robot.step(next_pos)
+        success = robot.move_to(next_pos)
 
         if not success:
             logger.error(f"Navigation failed at position {robot.position}")

@@ -245,11 +245,16 @@ def demonstrate_aws_csv(grid: Grid):
         Robot._next_robot_id = 1
 
         r1 = Robot(grid, 34)
+        # Use AWS helper to build a path-based CSV (full Dijkstra paths) for the
+        # scenario so the robot receives an explicit path and doesn't need to run
+        # pathfinding itself.
+        from aws import AWS
 
-        # CSV message: move to adjacent 2, fetch from CB 3 with rfid 111, move to 7, put at shelf 8
-        csv_msg = "move 2,fetch 3 111,move 28,put 29 111"
-        logger.info("Sending CSV AWS message to Robot 1: %s", csv_msg)
-        ok = r1.receive_aws_message(csv_msg)
+        aws = AWS(grid)
+        demo_job = {"cb_pos": 3, "shelf_pos": 29, "rfid": 111}
+        csv_msg = aws._build_csv_for_store(r1, demo_job)
+        logger.info("Sending CSV AWS assignment to Robot 1: assign:0:%s", csv_msg)
+        ok = r1.receive_aws_message(f"assign:0:{csv_msg}")
         logger.info("CSV processing finished (success=%s). Robot 1 final pos=%s", ok, r1.position)
     
 def demonstrate_low_battery_move(grid: Grid):
@@ -272,16 +277,167 @@ def demonstrate_low_battery_move(grid: Grid):
         # Drain battery so the path to a far target cannot be completed
         r1.battery_level = 1
 
-        csv_msg = "move 2,fetch 3 111,move 28,put 29 111"
-        logger.info("Sending CSV AWS message to Robot 1: %s", csv_msg)
-        ok = r1.receive_aws_message(csv_msg)
-        logger.info("move_to returned: %s", ok)
+        # Let AWS try to assign a realistic job; AWS will check battery and either
+        # assign, or create a charge job / retry.
+        from aws import AWS
+
+        aws = AWS(grid)
+        job_id = aws.create_store_incoming_job(3, 29)
+        logger.info("AWS created job %s; jobs state: %s", job_id, aws.jobs)
         logger.info("Notifications: %s", notifications)
 
-        assert not ok, "move_to should have failed due to insufficient battery"
-        assert notifications, "AWS should have been notified of insufficient battery"
+def demonstrate_aws_scheduler(grid: Grid):
+    """Demonstrate the AWS task scheduler assigning 'store incoming box' jobs."""
+    Robot._registry.clear()
+    Robot._message_queue.clear()
+    Robot._next_robot_id = 1
+
+    # Create some robots
+    r1 = Robot(grid, 34)
+    r2 = Robot(grid, 20)
+
+    # Drain r1 to force AWS to reassign if needed
+    r1.battery_level = 2
+
+    from aws import AWS
+
+    aws = AWS(grid)
+
+    # Create a store job: CB at 3 to shelf at 8
+    job_id = aws.create_store_incoming_job(3, 8)
+
+    logger.info(f"AWS created job {job_id}; jobs state: {aws.jobs}")
 
 
+def demonstrate_aws_outgoing(grid: Grid):
+    """Demonstrate AWS creating an outgoing box job (shelf -> CB)."""
+    Robot._registry.clear()
+    Robot._message_queue.clear()
+    Robot._next_robot_id = 1
+
+    # Create robots
+    r1 = Robot(grid, 34)
+    r2 = Robot(grid, 20)
+
+    from aws import AWS
+
+    aws = AWS(grid)
+
+    # Create an outgoing job: move a box from shelf 29 to CB 3
+    job_id = aws.create_outgoing_job(29, 3)
+    logger.info(f"AWS created outgoing job {job_id}; jobs state: {aws.jobs}")
+
+
+def demonstrate_aws_concurrency_and_charging(grid: Grid):
+    """Demonstrate AWS concurrency limit (5) and charge instructions for low-battery robots."""
+    Robot._registry.clear()
+    Robot._message_queue.clear()
+    Robot._next_robot_id = 1
+
+    # Create several robots (some with low battery) so AWS must decide who to assign
+    robots = [Robot(grid, pos) for pos in (1, 13, 19, 25, 31)]
+
+    aws = None
+    from aws import AWS
+
+    aws = AWS(grid)
+
+    # Create more than `max_concurrent_assignments` jobs to exercise the limit
+    created = []
+    for i in range(6):
+        jid = aws.create_store_incoming_job(cb_pos=3, shelf_pos=29 if i % 2 == 0 else 8)
+        created.append(jid)
+
+    logger.info("Created jobs: %s", created)
+
+    # Print the job states after assignment attempts
+    pending = [jid for jid, j in aws.jobs.items() if j.get("status") == "pending"]
+    assigned = [jid for jid, j in aws.jobs.items() if j.get("status") in ("assigned", "in_progress")]
+    complete = [jid for jid, j in aws.jobs.items() if j.get("status") == "complete"]
+
+    logger.info(f"Job counts: pending={len(pending)}, assigned/in_progress={len(assigned)}, complete={len(complete)}")
+    logger.info("Jobs detail: %s", aws.jobs)
+
+    # Verify that at most max_concurrent_assignments are assigned/in_progress
+    assert len(assigned) <= aws.max_concurrent_assignments
+
+    # Show that robots with low battery have (or will receive) charge jobs
+    charge_jobs = [j for j in aws.jobs.values() if j.get("type") == "charge"]
+    logger.info("Charge jobs created: %s", charge_jobs)
+
+
+
+def demonstrate_five_robots_concurrent(grid: Grid):
+    from aws import AWS
+    import time
+
+    print("\n--- Demonstrating 5 robots working concurrently ---")
+    # Reset robot registry if needed
+    Robot._registry = {}
+    Robot._next_robot_id = 1
+
+    # Create 5 robots at different starting positions
+    robots = [
+        Robot(grid, start_position=21),
+        Robot(grid, start_position=1),
+        Robot(grid, start_position=33),
+        Robot(grid, start_position=40),
+        Robot(grid, start_position=26),
+    ]
+
+    aws = AWS(grid)
+
+    # Create 5 store jobs (CB to shelf, different targets)
+    jobs = []
+    jobs.append(aws.create_store_incoming_job(cb_pos=6, shelf_pos=35))
+    jobs.append(aws.create_store_incoming_job(cb_pos=37, shelf_pos=9))
+    jobs.append(aws.create_store_incoming_job(cb_pos=6, shelf_pos=8))
+    jobs.append(aws.create_store_incoming_job(cb_pos=37, shelf_pos=29))
+    jobs.append(aws.create_store_incoming_job(cb_pos=6, shelf_pos=35))
+    # Wait for all jobs to complete (simple polling loop)
+    all_done = False
+    while not all_done:
+        all_done = True
+        for job_id in jobs:
+            status = aws.jobs[job_id]["status"]
+            print(f"Job {job_id} status: {status}")
+            if status not in ("complete", "failed"):
+                all_done = False
+        if not all_done:
+            time.sleep(0.5)
+    print("--- All 5 robots have completed their assignments ---\n")
+
+
+def demonstrate_synchronized_aws_execution(grid: Grid):
+    """Demonstrate synchronized AWS assignments with phase-based execution."""
+    Robot._registry.clear()
+    Robot._message_queue.clear()
+    Robot._next_robot_id = 1
+
+    # Create 5 robots at different starting positions
+    robots = [
+        Robot(grid, start_position=21),
+        Robot(grid, start_position=1),
+        Robot(grid, start_position=33),
+        Robot(grid, start_position=40),
+        Robot(grid, start_position=26),
+    ]
+    
+    robots[2].battery_level = 15  # Simulate low battery for one robot
+
+    logger.info(f"Created 5 robots at positions: {[r.position for r in robots]}")
+
+    # Define job specs (cb_pos, shelf_pos)
+    job_specs = [
+        (6, 35),
+        (37, 9),
+        (6, 8),
+        (37, 29),
+        (6, 29),
+    ]
+
+    # Use warehouse_interaction_simulator to orchestrate everything
+    wis.run_synchronized_aws_assignments(robots, job_specs, grid)
 
 def main():
     """Main function demonstrating all functionality"""
@@ -294,12 +450,12 @@ def main():
     grid.add_shelf(9)
     grid.add_shelf(29)
     grid.add_shelf(35)
-    grid.add_cb(3)
-    grid.add_cb(4)
+    grid.add_cb(6)
+    grid.add_cb(37)
 
     assert grid.is_walkable(1), "Position 1 should be walkable"
     assert not grid.is_walkable(8), "Position 8 should not be walkable"
-    assert not grid.is_walkable(3), "Position 3 should not be walkable"
+    assert not grid.is_walkable(29), "Position 3 should not be walkable"
     assert grid.is_walkable(10), "Position 10 should be walkable"
 
     logger.info("Initial Grid Configuration:")
@@ -314,15 +470,20 @@ def main():
 
     # demonstrate_bug2_blocked(grid, start=1, goal=42)
 
-    # demonstrate_fetch_box(grid, 1, 29)
+    #demonstrate_fetch_box(grid, 1, 29)
 
-    demonstrate_put_box(grid, 1, 4, 8)
+    #demonstrate_put_box(grid, 1, 4, 8)
 
-    demonstrate_multi_robots(grid)
+    #demonstrate_multi_robots(grid)
 
-    demonstrate_aws_csv(grid)
+    #demonstrate_aws_csv(grid)
     
-    demonstrate_low_battery_move(grid)
+    #demonstrate_low_battery_move(grid)
+    
+    #demonstrate_aws_scheduler(grid)
+    #demonstrate_aws_outgoing(grid)
+    #demonstrate_aws_concurrency_and_charging(grid)
+    demonstrate_synchronized_aws_execution(grid)
 
 
     logger.info("=" * 60)
