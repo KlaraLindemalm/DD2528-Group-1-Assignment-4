@@ -283,7 +283,6 @@ class Robot:
             if isinstance(pl, tuple) and len(pl) == 3:
                 candidates.append(pl)
             else:
-                # older single-value payloads may be (timestamp, position)
                 t, pos = pl
                 candidates.append((t, pos, sid))
 

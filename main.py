@@ -3,6 +3,7 @@ from robot import Robot
 import dijkstra
 import bug2
 import logger as log_config
+import warehouse_interaction_simulator as wis
 
 log_config.configure_root_logger()
 import logging
@@ -212,6 +213,74 @@ def demonstrate_put_box(grid: Grid, start: int, cb_pos: int, shelf_goal: int):
         logger.info(f"Successfully put item with RFID {rfid} on shelf at {shelf_goal}")
     else:
         logger.error("Failed to put item on shelf!")
+        
+def demonstrate_multi_robots(grid: Grid):
+        Robot._registry.clear()
+        Robot._message_queue.clear()
+        Robot._next_robot_id = 1
+
+        starts = [1, 10, 20, 24, 34]
+        goals = [41, 20, 10, 34, 24]
+
+        robots = [Robot(grid, s) for s in starts]
+        paths: list[list[int]] = []
+        for r, g in zip(robots, goals):
+            path = dijkstra.find_path(r, g)
+            if not path:
+                logger.error(f"No path for R{r.robot_id} to {g}")
+                return
+            paths.append(path)
+
+        logger.info("Starting 5-robot scenario")
+
+        res = wis.run_multi_robot_paths(robots, paths)
+        logger.info(f"5-robot result: {res}")
+        for r in robots:
+            logger.info(f"Robot {r.robot_id} final pos: {r.position}")
+            
+def demonstrate_aws_csv(grid: Grid):
+        """Send a single CSV AWS message to a robot and observe sequential execution."""
+        Robot._registry.clear()
+        Robot._message_queue.clear()
+        Robot._next_robot_id = 1
+
+        r1 = Robot(grid, 34)
+
+        # CSV message: move to adjacent 2, fetch from CB 3 with rfid 111, move to 7, put at shelf 8
+        csv_msg = "move 2,fetch 3 111,move 28,put 29 111"
+        logger.info("Sending CSV AWS message to Robot 1: %s", csv_msg)
+        ok = r1.receive_aws_message(csv_msg)
+        logger.info("CSV processing finished (success=%s). Robot 1 final pos=%s", ok, r1.position)
+    
+def demonstrate_low_battery_move(grid: Grid):
+        """Demonstrate that move_to refuses to start when battery is insufficient."""
+        Robot._registry.clear()
+        Robot._message_queue.clear()
+        Robot._next_robot_id = 1
+
+        r1 = Robot(grid, 26)
+
+        # Register an AWS callback to capture notifications
+        notifications = []
+
+        def aws_cb(rid, message):
+            notifications.append((rid, message))
+            logger.info(f"AWS CALLBACK received from R{rid}: {message}")
+
+        Robot.register_aws_callback(aws_cb)
+
+        # Drain battery so the path to a far target cannot be completed
+        r1.battery_level = 1
+
+        csv_msg = "move 2,fetch 3 111,move 28,put 29 111"
+        logger.info("Sending CSV AWS message to Robot 1: %s", csv_msg)
+        ok = r1.receive_aws_message(csv_msg)
+        logger.info("move_to returned: %s", ok)
+        logger.info("Notifications: %s", notifications)
+
+        assert not ok, "move_to should have failed due to insufficient battery"
+        assert notifications, "AWS should have been notified of insufficient battery"
+
 
 
 def main():
@@ -249,77 +318,12 @@ def main():
 
     demonstrate_put_box(grid, 1, 4, 8)
 
-    def demonstrate_multi_robots(grid: Grid):
-        Robot._registry.clear()
-        Robot._message_queue.clear()
-        Robot._next_robot_id = 1
-
-        starts = [1, 10, 20, 24, 34]
-        goals = [41, 20, 10, 34, 24]
-
-        robots = [Robot(grid, s) for s in starts]
-        paths: list[list[int]] = []
-        for r, g in zip(robots, goals):
-            path = dijkstra.find_path(r, g)
-            if not path:
-                logger.error(f"No path for R{r.robot_id} to {g}")
-                return
-            paths.append(path)
-
-        logger.info("Starting 5-robot scenario")
-        res = bug2.run_multi_robot_paths(robots, paths)
-        logger.info(f"5-robot result: {res}")
-        for r in robots:
-            logger.info(f"Robot {r.robot_id} final pos: {r.position}")
-
     demonstrate_multi_robots(grid)
 
-    def demonstrate_aws_csv(grid: Grid):
-        """Send a single CSV AWS message to a robot and observe sequential execution."""
-        Robot._registry.clear()
-        Robot._message_queue.clear()
-        Robot._next_robot_id = 1
-
-        r1 = Robot(grid, 34)
-
-        # CSV message: move to adjacent 2, fetch from CB 3 with rfid 111, move to 7, put at shelf 8
-        csv_msg = "move 2,fetch 3 111,move 28,put 29 111"
-        logger.info("Sending CSV AWS message to Robot 1: %s", csv_msg)
-        ok = r1.receive_aws_message(csv_msg)
-        logger.info("CSV processing finished (success=%s). Robot 1 final pos=%s", ok, r1.position)
-
     demonstrate_aws_csv(grid)
-
-    def demonstrate_low_battery_move(grid: Grid):
-        """Demonstrate that move_to refuses to start when battery is insufficient."""
-        Robot._registry.clear()
-        Robot._message_queue.clear()
-        Robot._next_robot_id = 1
-
-        r1 = Robot(grid, 26)
-
-        # Register an AWS callback to capture notifications
-        notifications = []
-
-        def aws_cb(rid, message):
-            notifications.append((rid, message))
-            logger.info(f"AWS CALLBACK received from R{rid}: {message}")
-
-        Robot.register_aws_callback(aws_cb)
-
-        # Drain battery so the path to a far target cannot be completed
-        r1.battery_level = 1
-
-        csv_msg = "move 2,fetch 3 111,move 28,put 29 111"
-        logger.info("Sending CSV AWS message to Robot 1: %s", csv_msg)
-        ok = r1.receive_aws_message(csv_msg)
-        logger.info("move_to returned: %s", ok)
-        logger.info("Notifications: %s", notifications)
-
-        assert not ok, "move_to should have failed due to insufficient battery"
-        assert notifications, "AWS should have been notified of insufficient battery"
-
+    
     demonstrate_low_battery_move(grid)
+
 
     logger.info("=" * 60)
     logger.info("ALL DEMONSTRATIONS COMPLETED")
