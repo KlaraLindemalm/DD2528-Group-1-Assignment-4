@@ -181,39 +181,65 @@ class Robot:
                 return robot
         return None
 
-    def collision_protocol(self, other_robot: "Robot") -> bool:
+    def collision_protocol(self, other_robot: "Robot" | List["Robot"]) -> bool:
+        """Collision ordering among one or more other robots. Return True if this
+        robot is the leader (goes first). Simple protocol: exchange timestamps
+        with all participants and pick min (timestamp, position, robot_id).
         """
-        Execute collision detection and ordering protocol.
-        Returns True if this robot should go first (leader), False if it should wait.
-        
-        Protocol:
-        - Send collision message with (timestamp, position)
-        - Receive other's collision message
-        - Compare: lower timestamp wins, tie-break by lower position
-        - Both robots acknowledge the order
-        """
-        timestamp = time.time()
-        message_payload = (timestamp, self.position)
-        
-        logger.info(f"Robot {self.robot_id}: sending collision message to Robot {other_robot.robot_id}")
-        self.send_message(other_robot.robot_id, MessageType.COLLISION_DETECTED, message_payload)
-        
-        # Wait for other robot's collision message
-        other_msg = self.receive_message(MessageType.COLLISION_DETECTED, timeout=1.0)
-        if other_msg is None:
-            logger.warning(f"Robot {self.robot_id}: no collision response from {other_robot.robot_id}, assuming leader")
-            return True
-        
-        other_robot_id, _, other_payload = other_msg
-        other_timestamp, other_position = other_payload
-        
-        # Determine order: lower timestamp wins, tie-break by lower position
-        if other_timestamp < timestamp or (other_timestamp == timestamp and other_position < self.position):
-            # Other robot goes first
-            logger.info(f"Robot {self.robot_id}: other robot goes first (ts {other_timestamp} vs {timestamp}, pos {other_position} vs {self.position})")
-            self.send_message(other_robot_id, MessageType.COLLISION_ACK, None)
-            return False
+        # Normalize to list of other robots
+        others = []
+        if isinstance(other_robot, list) or isinstance(other_robot, tuple):
+            others = [r for r in other_robot if r.robot_id != self.robot_id]
         else:
-            # This robot goes first
-            logger.info(f"Robot {self.robot_id}: this robot goes first (ts {timestamp} vs {other_timestamp}, pos {self.position} vs {other_position})")
-            self.send_message(other_robot_id, MessageType.COLLISION_ACK, None)
+            if other_robot.robot_id != self.robot_id:
+                others = [other_robot]
+
+        timestamp = time.time()
+        payload = (timestamp, self.position, self.robot_id)
+
+        # Broadcast COLLISION_DETECTED to all others
+        for r in others:
+            logger.info(f"Robot {self.robot_id}: sending collision message to Robot {r.robot_id}")
+            self.send_message(r.robot_id, MessageType.COLLISION_DETECTED, payload)
+
+        # Collect messages from expected participants
+        expected = {r.robot_id for r in others}
+        received: dict[int, tuple[float, int, int]] = {}
+        deadline = time.time() + 1.0
+        while time.time() < deadline and expected - set(received.keys()):
+            queue = Robot._message_queue.get(self.robot_id, [])
+            i = 0
+            while i < len(queue):
+                sender_id, mtype, pl = queue[i]
+                if mtype == MessageType.COLLISION_DETECTED and sender_id in expected and sender_id not in received:
+                    received[sender_id] = pl  # (timestamp, position, robot_id)
+                    queue.pop(i)
+                    continue
+                i += 1
+            time.sleep(0.01)
+
+        # Build candidate list including self
+        candidates: list[tuple[float, int, int]] = []
+        candidates.append(payload)
+        for sid, pl in received.items():
+            if isinstance(pl, tuple) and len(pl) == 3:
+                candidates.append(pl)
+            else:
+                # older single-value payloads may be (timestamp, position)
+                t, pos = pl
+                candidates.append((t, pos, sid))
+
+        # Pick minimal by (timestamp, position, robot_id)
+        leader = min(candidates, key=lambda x: (x[0], x[1], x[2]))
+        is_leader = leader[2] == self.robot_id
+
+        # Send ACKs for compatibility
+        for r in others:
+            self.send_message(r.robot_id, MessageType.COLLISION_ACK, None)
+
+        if is_leader:
+            logger.info(f"Robot {self.robot_id}: elected leader in collision (payload={payload})")
+        else:
+            logger.info(f"Robot {self.robot_id}: elected follower in collision (leader={leader[2]})")
+
+        return is_leader

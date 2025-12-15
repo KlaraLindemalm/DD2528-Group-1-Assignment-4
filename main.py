@@ -249,6 +249,31 @@ def main():
 
     demonstrate_put_box(grid, 1, 4, 8)
 
+    def demonstrate_multi_robots(grid: Grid):
+        Robot._registry.clear()
+        Robot._message_queue.clear()
+        Robot._next_robot_id = 1
+
+        starts = [1, 10, 20, 24, 34]
+        goals = [2, 34, 24, 20, 10]
+
+        robots = [Robot(grid, s) for s in starts]
+        paths: list[list[int]] = []
+        for r, g in zip(robots, goals):
+            path = dijkstra.find_path(r, g)
+            if not path:
+                logger.error(f"No path for R{r.robot_id} to {g}")
+                return
+            paths.append(path)
+
+        logger.info("Starting 5-robot scenario")
+        res = bug2.run_two_robot_paths(robots, paths)
+        logger.info(f"5-robot result: {res}")
+        for r in robots:
+            logger.info(f"Robot {r.robot_id} final pos: {r.position}")
+
+    demonstrate_multi_robots(grid)
+
     logger.info("=" * 60)
     logger.info("ALL DEMONSTRATIONS COMPLETED")
     logger.info("=" * 60)

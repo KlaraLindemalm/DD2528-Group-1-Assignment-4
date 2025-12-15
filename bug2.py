@@ -4,7 +4,7 @@ Implements boundary following when obstacles are encountered.
 """
 
 from typing import List, Set, Optional, Tuple
-from robot import Robot
+from robot import Robot, MessageType
 import logging
 from enum import Enum
 
@@ -169,7 +169,7 @@ def bug2_navigate(
             visited_in_boundary.add(next_pos)
 
     if robot.position == goal:
-        logger.info(f"Successfully reached goal at position {goal}")
+        logger.info("Successfully reached goal at position %s", goal)
         return True
     else:
         logger.error(f"Max iterations reached without finding goal")
@@ -205,7 +205,6 @@ def execute_path(
 
     for i in range(1, len(path)):
         next_pos = path[i]
-
         # Check if obstacle is a robot
         obstacle_type = get_obstacle_type(robot, next_pos)
         
@@ -258,6 +257,15 @@ def execute_path(
 
     logger.info(f"Successfully executed path, reached goal at {goal}")
     return True
+
+
+def get_obstacle_type(robot: Robot, pos: int) -> Optional[str]:
+    """Return 'robot' if a robot occupies pos, 'shelf' if shelf, else None."""
+    if Robot.get_robot_at(pos) is not None:
+        return "robot"
+    if robot.grid.is_shelf(pos):
+        return "shelf"
+    return None
 
 
 def handle_pair_collision(
@@ -369,10 +377,10 @@ def _step_robot(robot: Robot, path: List[int], idx: int) -> tuple[int, bool]:
 
 
 def run_two_robot_paths(
-    robot1: Robot,
-    path1: List[int],
-    robot2: Robot,
-    path2: List[int],
+    robot1: Robot | List[Robot],
+    path1: List[int] | List[List[int]],
+    robot2: Optional[Robot] = None,
+    path2: Optional[List[int]] = None,
     dynamic_obstacles: Optional[Set[int]] = None,
     timeout: float = 10.0,
 ) -> dict:
@@ -386,55 +394,128 @@ def run_two_robot_paths(
     if dynamic_obstacles is None:
         dynamic_obstacles = set()
 
-    logger.info(f"Running two-robot concurrent paths: R{robot1.robot_id} and R{robot2.robot_id}")
+    # Flexible input: allow either (robot, path, robot2, path2, ...) or
+    # ( [robots], [paths], ... )
+    if isinstance(robot1, list):
+        robots: List[Robot] = robot1
+        paths: List[List[int]] = path1  # type: ignore
+    else:
+        assert robot2 is not None and path2 is not None, "Two-robot mode requires both robots and paths"
+        robots = [robot1, robot2]
+        paths = [path1, path2]  # type: ignore
+
+    n = len(robots)
+    assert n == len(paths), "Robots and paths length mismatch"
+
+    logger.info(f"Running concurrent paths for robots: {[r.robot_id for r in robots]}")
 
     # Indices start at 1 because path[0] is the starting position
-    idx1 = 1
-    idx2 = 1
-    success1 = True
-    success2 = True
+    idxs = [1] * n
+    success = [True] * n
 
-    while idx1 < len(path1) or idx2 < len(path2):
-        # Pre-move collision detection when both have a next step
-        collision, next1, next2 = _pre_move_collision(robot1, idx1, path1, robot2, idx2, path2)
-        if collision:
-            logger.warning(
-                f"Collision detected between R{robot1.robot_id} ({robot1.position}->{next1}) "
-                f"and R{robot2.robot_id} ({robot2.position}->{next2})"
-            )
+    while any(idxs[i] < len(paths[i]) for i in range(n)):
+        # Build next positions for those who have a next step
+        next_pos = {}
+        for i in range(n):
+            if idxs[i] < len(paths[i]):
+                next_pos[i] = paths[i][idxs[i]]
 
-            res = handle_pair_collision(robot1, path1[-1], robot2, path2[-1], dynamic_obstacles, timeout)
+        # Build collision graph (undirected) among robots wishing to move
+        graph: dict[int, set[int]] = {i: set() for i in range(n)}
+        for i in next_pos:
+            for j in next_pos:
+                if i >= j:
+                    continue
+                ni = next_pos[i]
+                nj = next_pos[j]
+                pi = robots[i].position
+                pj = robots[j].position
+                if ni == nj or ni == pj or nj == pi or (pi == nj and pj == ni):
+                    graph[i].add(j)
+                    graph[j].add(i)
 
-            # Advance only the leader indices to stop stepping; followers continue from current position
-            # After collision, leaders will have navigated around, so skip to end to stop their stepping
-            if res.get("leader1"):
-                idx1 = len(path1)
-                success1 = res.get("success1", False)
-            if res.get("leader2"):
-                idx2 = len(path2)
-                success2 = res.get("success2", False)
+        # Find connected components of collisions
+        visited = set()
+        groups: List[List[int]] = []
+        for i in range(n):
+            if i in visited or not graph[i]:
+                continue
+            stack = [i]
+            comp = []
+            while stack:
+                v = stack.pop()
+                if v in visited:
+                    continue
+                visited.add(v)
+                comp.append(v)
+                for nb in graph[v]:
+                    if nb not in visited:
+                        stack.append(nb)
+            if len(comp) > 1:
+                groups.append(comp)
 
-            # Followers continue stepping with updated private_obstacles from leader's final position
+        # Resolve each collision group
+        if groups:
+            for comp in groups:
+                group_robots = [robots[i] for i in comp]
+
+                # Each robot runs collision protocol against the whole group
+                leaders = []
+                for r in group_robots:
+                    if r.collision_protocol(group_robots):
+                        leaders.append(r)
+
+                # Pick deterministic leader if multiple
+                if not leaders:
+                    leader = min(group_robots, key=lambda r: r.robot_id)
+                else:
+                    leader = min(leaders, key=lambda r: r.robot_id)
+
+                leader_idx = robots.index(leader)
+                leader_goal = paths[leader_idx][-1]
+
+                # Leader navigates around; followers wait
+                logger.info(f"Leader in group {comp} is R{leader.robot_id}")
+                for i in comp:
+                    if i != leader_idx:
+                        leader.private_obstacles.add(robots[i].position)
+
+                leader_success = bug2_navigate(leader, leader_goal, dynamic_obstacles.union(leader.private_obstacles) if dynamic_obstacles else leader.private_obstacles)
+
+                # Notify followers
+                for i in comp:
+                    if i == leader_idx:
+                        continue
+                    leader.send_message(robots[i].robot_id, MessageType.FINISHED, leader.position)
+
+                # Followers update private obstacles
+                for i in comp:
+                    if i == leader_idx:
+                        success[i] = leader_success
+                        idxs[i] = len(paths[i])
+                        continue
+                    msg = robots[i].receive_message(MessageType.FINISHED, timeout=timeout)
+                    if msg is not None:
+                        _, _, leader_pos = msg
+                        robots[i].private_obstacles.add(leader_pos)
+                    else:
+                        logger.warning(f"Robot {robots[i].robot_id}: timeout waiting for group leader FINISHED")
+                        success[i] = False
+
+            # After handling groups, continue to next loop iteration
             continue
 
-        # Robot 1 step
-        if idx1 < len(path1):
-            idx1, ok1 = _step_robot(robot1, path1, idx1)
-            if not ok1:
-                success1 = False
-                idx1 = len(path1)
+        # No group collisions; step all robots one by one
+        for i in range(n):
+            if idxs[i] < len(paths[i]):
+                idxs[i], ok = _step_robot(robots[i], paths[i], idxs[i])
+                if not ok:
+                    success[i] = False
+                    idxs[i] = len(paths[i])
 
-        # Robot 2 step
-        if idx2 < len(path2):
-            idx2, ok2 = _step_robot(robot2, path2, idx2)
-            if not ok2:
-                success2 = False
-                idx2 = len(path2)
-
-    return {
-        "success1": success1,
-        "success2": success2,
-        "final1": robot1.position,
-        "final2": robot2.position,
-    }
+    # Build results
+    results = {f"success{i+1}": success[i] for i in range(n)}
+    for i in range(n):
+        results[f"final{i+1}"] = robots[i].position
+    return results
 
