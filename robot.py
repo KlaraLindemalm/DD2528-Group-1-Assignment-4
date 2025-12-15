@@ -19,7 +19,7 @@ TODOs:
     [] Notify low battery
 [X] Fetch method
 [X] Put method
-[] Message receiving
+[X] Message receiving
 """
 
 class MessageType(Enum):
@@ -61,14 +61,15 @@ class Robot:
         # Register robot and message queue
         Robot._registry[self.robot_id] = self
         Robot._message_queue[self.robot_id] = []
+        self.active = True
 
         # Log via per-robot logger so the logger name column shows the robot id
         self.logger.info(f"initialized at position {start_position}")
 
-    def move_to(self, new_position: int) -> bool:
+    def step(self, new_position: int) -> bool:
         """
-        Move robot to a new position with safety checks
-        Returns True if successful, False otherwise
+        Step the robot one position (adjacent) with safety checks.
+        Returns True if successful, False otherwise.
         """
         assert self.grid.is_valid_position(
             new_position
@@ -92,18 +93,72 @@ class Robot:
 
         if self.battery_level <= 0:
             self.logger.warning("Cannot move: battery depleted")
+            self.notify_aws("Battery depleted")
+            self.active = False
+            return False
+
+        if self.battery_level - 1 <= 0:
+            self.logger.warning(
+                f"Insufficient battery to step to {new_position} (need {required}, have {self.battery_level})"
+            )
+            self.notify_aws("Battery depleted during step")
+            self.active = False
             return False
 
         old_position = self.position
         self.position = new_position
-
-        distance = self.grid.manhattan_distance(old_position, new_position)
-        self.battery_level -= distance
+        self.battery_level -= 1
 
         self.logger.info(
             f"Moved {old_position} ➡ {new_position}\t[⚡️{self.battery_level}% left]"
         )
         return True
+
+    # AWS notification mechanism: external code can register a callback
+    _aws_callback = None
+
+    @classmethod
+    def register_aws_callback(cls, callback):
+        cls._aws_callback = callback
+
+    def notify_aws(self, message: str) -> None:
+        """Notify AWS about an important event."""
+        # Log as an error-level message and invoke callback if present
+        self.logger.error(f"NOTIFY_AWS: {message}")
+        if Robot._aws_callback is not None:
+            try:
+                Robot._aws_callback(self.robot_id, message)
+            except Exception as e:
+                self.logger.exception("AWS callback failed: %s", e)
+
+    def move_to(self, target: int) -> bool:
+        if not self.active:
+            self.logger.warning("Cannot execute move: robot inactive due to prior error or depleted battery")
+            return False
+
+        import dijkstra
+        import bug2
+
+        if target == self.position:
+            # Already there
+            return True
+
+        path = dijkstra.find_path(self, target)
+        if not path:
+            self.logger.warning(f"No path found to target {target}")
+            return False
+
+        required = max(0, len(path) - 1)
+
+        if self.battery_level - required <= 0:
+            self.logger.warning(
+                f"Insufficient battery to move to {target} (need {required}, have {self.battery_level})"
+            )
+            self.notify_aws(f"Insufficient battery to move to {target} (need {required}, have {self.battery_level})")
+            self.active = False
+            return False
+
+        return bug2.execute_path(self, path)
 
     def get_position(self) -> int:
         """Get the current position of the robot"""
@@ -122,7 +177,7 @@ class Robot:
         """Fetch an item with the given RFID"""
         if (dist := self.grid.manhattan_distance(cb_pos, self.position)) != 1:
             self.logger.warning(
-                f"Cannot put item, robot at {self.position}, not adjacent to CB at {cb_pos} (distance {dist})"
+                f"Cannot fetch item, robot at {self.position}, not adjacent to CB at {cb_pos} (distance {dist})"
             )
         self.rfid_held = rfid
         self.logger.info(f"📦 Fetched item with RFID {rfid}")
@@ -246,3 +301,87 @@ class Robot:
             self.logger.info(f"elected follower in collision (leader={leader[2]})")
 
         return is_leader
+
+    def receive_aws_message(self, msg: str) -> bool:
+        """Process a single AWS message consisting of comma-separated instructions.
+
+        Expected CSV format (examples):
+          "move 2,fetch 3 111,move 7,put 8 111"
+
+        Supported commands:
+          - move <pos>
+          - charge <pos>
+          - fetch <pos> [rfid]
+          - put <pos> [rfid]
+
+        The robot will execute instructions in order
+        """
+        if not isinstance(msg, str):
+            self.logger.warning("AWS message must be a comma-separated string")
+            return False
+
+        if not self.active:
+            self.logger.warning("Cannot process AWS message: robot inactive due to battery or prior error")
+            return False
+
+        overall_ok = True
+        parts = [p.strip() for p in msg.split(",") if p.strip()]
+        for inst in parts:
+            tokens = inst.split()
+            if not tokens:
+                continue
+            cmd = tokens[0].lower()
+            try:
+                match cmd:
+                    case "move":
+                        if len(tokens) < 2:
+                            self.logger.warning("Invalid move instruction (missing target): %s", inst)
+                            overall_ok = False
+                            break
+                        target = int(tokens[1])
+                        ok = self.move_to(target)
+                        if ok:
+                            self.logger.info(f"AWS executed move to {target}")
+                        else:
+                            self.logger.warning(f"AWS move to {target} failed")
+                            overall_ok = False
+
+                    case "fetch":
+                        if len(tokens) < 2:
+                            self.logger.warning("Invalid fetch instruction (missing target): %s", inst)
+                            overall_ok = False
+                            break
+                        target = int(tokens[1])
+                        rfid = int(tokens[2]) if len(tokens) > 2 else -1
+                        ok = self.fetch_item(target, rfid)
+                        if not ok:
+                            overall_ok = False
+
+                    case "put":
+                        if len(tokens) < 3:
+                            self.logger.warning("Invalid put instruction (need target and rfid): %s", inst)
+                            overall_ok = False
+                            break
+                        target = int(tokens[1])
+                        rfid = int(tokens[2])
+                        ok = self.put_item(target, rfid)
+                        if not ok:
+                            overall_ok = False
+                    case "charge":
+                        if len(tokens) < 2:
+                            self.logger.warning("Invalid charge instruction (missing target): %s", inst)
+                            overall_ok = False
+                            break
+                        target = int(tokens[1])
+                        ok = self.charge_at(target)
+                        if not ok:
+                            overall_ok = False
+
+                    case _:
+                        self.logger.warning("Unknown AWS instruction: %s", inst)
+                        overall_ok = False
+            except Exception as e:
+                self.logger.warning("Error executing AWS instruction '%s': %s", inst, e)
+                overall_ok = False
+
+        return overall_ok

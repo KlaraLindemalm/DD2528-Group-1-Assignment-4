@@ -274,6 +274,53 @@ def main():
 
     demonstrate_multi_robots(grid)
 
+    def demonstrate_aws_csv(grid: Grid):
+        """Send a single CSV AWS message to a robot and observe sequential execution."""
+        Robot._registry.clear()
+        Robot._message_queue.clear()
+        Robot._next_robot_id = 1
+
+        r1 = Robot(grid, 34)
+
+        # CSV message: move to adjacent 2, fetch from CB 3 with rfid 111, move to 7, put at shelf 8
+        csv_msg = "move 2,fetch 3 111,move 28,put 29 111"
+        logger.info("Sending CSV AWS message to Robot 1: %s", csv_msg)
+        ok = r1.receive_aws_message(csv_msg)
+        logger.info("CSV processing finished (success=%s). Robot 1 final pos=%s", ok, r1.position)
+
+    demonstrate_aws_csv(grid)
+
+    def demonstrate_low_battery_move(grid: Grid):
+        """Demonstrate that move_to refuses to start when battery is insufficient."""
+        Robot._registry.clear()
+        Robot._message_queue.clear()
+        Robot._next_robot_id = 1
+
+        r1 = Robot(grid, 26)
+
+        # Register an AWS callback to capture notifications
+        notifications = []
+
+        def aws_cb(rid, message):
+            notifications.append((rid, message))
+            logger.info(f"AWS CALLBACK received from R{rid}: {message}")
+
+        Robot.register_aws_callback(aws_cb)
+
+        # Drain battery so the path to a far target cannot be completed
+        r1.battery_level = 1
+
+        csv_msg = "move 2,fetch 3 111,move 28,put 29 111"
+        logger.info("Sending CSV AWS message to Robot 1: %s", csv_msg)
+        ok = r1.receive_aws_message(csv_msg)
+        logger.info("move_to returned: %s", ok)
+        logger.info("Notifications: %s", notifications)
+
+        assert not ok, "move_to should have failed due to insufficient battery"
+        assert notifications, "AWS should have been notified of insufficient battery"
+
+    demonstrate_low_battery_move(grid)
+
     logger.info("=" * 60)
     logger.info("ALL DEMONSTRATIONS COMPLETED")
     logger.info("=" * 60)

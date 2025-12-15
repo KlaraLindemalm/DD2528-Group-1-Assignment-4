@@ -115,7 +115,7 @@ def navigate(robot: Robot, goal: int) -> bool:
     # Execute the path
     for i in range(1, len(path)):
         next_pos = path[i]
-        success = robot.move_to(next_pos)
+        success = robot.step(next_pos)
 
         if not success:
             logger.error(f"Navigation failed at position {robot.position}")

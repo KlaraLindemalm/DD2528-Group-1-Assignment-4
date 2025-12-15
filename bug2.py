@@ -93,8 +93,11 @@ def bug2_navigate(
             if best_distance < current_m_distance:
                 # Good progress, move toward goal
                 logger.info(f"Direct mode - moving to {best_neighbor}")
-                success = robot.move_to(best_neighbor)
+                success = robot.step(best_neighbor)
                 if not success:
+                    if not robot.active or robot.get_battery_level() <= 0:
+                        robot.notify_aws("Battery depleted during Bug2 direct mode")
+                        robot.active = False
                     logger.error(f"Failed to move to {best_neighbor} in direct mode")
                     return False
             else:
@@ -114,8 +117,11 @@ def bug2_navigate(
                     logger.error("No valid neighbors when entering boundary mode")
                     return False
 
-                success = robot.move_to(valid_neighbors[0])
+                success = robot.step(valid_neighbors[0])
                 if not success:
+                    if not robot.active or robot.get_battery_level() <= 0:
+                        robot.notify_aws("Battery depleted when entering boundary mode")
+                        robot.active = False
                     logger.error(
                         f"Failed to move to {valid_neighbors[0]} when entering boundary mode"
                     )
@@ -161,8 +167,11 @@ def bug2_navigate(
                     )
                     return False
 
-            success = robot.move_to(next_pos)
+            success = robot.step(next_pos)
             if not success:
+                if not robot.active or robot.get_battery_level() <= 0:
+                    robot.notify_aws("Battery depleted during Bug2 boundary mode")
+                    robot.active = False
                 logger.error(f"Failed to move to {next_pos} in boundary mode")
                 return False
             logger.info(f"Boundary mode - moving to {next_pos}")
@@ -252,8 +261,13 @@ def execute_path(
             return bug2_navigate(robot, goal, dynamic_obstacles.union(other_positions))
 
         # Move to next position
-        success = robot.move_to(next_pos)
-        assert success, f"Failed to move to position {next_pos}"
+        success = robot.step(next_pos)
+        if not success:
+            if not robot.active or robot.get_battery_level() <= 0:
+                robot.notify_aws("Battery depleted during path execution")
+                robot.active = False
+            logger.error(f"Failed to move to position {next_pos}")
+            return False
 
     logger.info(f"Successfully executed path, reached goal at {goal}")
     return True
@@ -279,7 +293,7 @@ def _step_robot(robot: Robot, path: List[int], idx: int) -> tuple[int, bool]:
 
     next_pos = path[idx]
     if next_pos not in robot.private_obstacles and robot.grid.is_walkable(next_pos):
-        moved = robot.move_to(next_pos)
+        moved = robot.step(next_pos)
         if moved:
             return idx + 1, True
         else:
